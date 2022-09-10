@@ -5,65 +5,56 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 import * as Queue from "https://scotwatson.github.io/Queue/Queue.mjs";
 
+const audioContext = new self.AudioContext();
+await audioContext.audioWorklet.addModule("audio-input-processor.js");
+await audioContext.audioWorklet.addModule("audio-output-processor.js");
+audioContext.createAudioInput = function () {
+  return new AudioWorkletNode(audioContext, "audio-input-processor");
+};
+audioContext.createAudioOutput = function () {
+  return new AudioWorkletNode(audioContext, "audio-output-processor");
+};
+
 export class PushSourceMicrophone extends EventTarget {
-  #stream;
+  #inputNode;
   constructor() {
-    this.#stream = null;
+    this.#inputNode = null;
   }
   async start(constraints) {
+    const that = this;
     try {
-      this.#stream = await navigator.mediaDevices.getUserMedia({
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: true,
       });
-      
-      this.#stream;
+      const sourceNode = audioContext.createMediaStreamAudioSource({
+        mediaStream,
+      });
+      this.#inputNode = audioContext.createAudioInput();
+      sourceNode.connect(this.#inputNode);
+      this.#inputNode.port.addEventListener("message", function (evt) {
+        that.dispatchEvent("push", evt.data);
+      });
     } catch (err) {
-      /* handle the error */
+      throw new Error("Unable to start");
     }
   }
-  
-}
+  async stop() {
+    this.#inputNode = null;
+  }
+};
 
 export class PushSinkSpeaker extends EventTarget {
-  #ac;
-  #timeInterval;
-  #lastStartTime;
-  #minQueueSize;
-  #maxQueueSize;
-  #queue;
+  #outputNode;
   constructor(args) {
-    if (!args.hasOwnProperty("timeInterval")) {
-      throw new Error("timeInterval is required.");
-    }
-    this.#ac = new window.AudioContext();
-    this.#timeInterval = args.timeInterval;
-    this.#lastStartTime = this.#ac.currentTime;
-    this.#queue = new Queue.Queue({
-      class: window.AudioBuffer,
-      length: 10,
-    });
-    self.setInterval(function (evt) {
-      const bufferSourceNode = this.#ac.createBufferSource();
-      try {
-        bufferSourceNode.buffer = this.#queue.dequeue();
-      } catch (e) {
-        this.dispatchEvent(new Event("buffering"));
-      }
-      bufferSourceNode.connect(this.#ac.destination);
-      this.#lastStartTime += args.timeInterval;
-      bufferSourceNode.start(this.#lastStartTime);
+    const that = this;
+    this.#outputNode = audioContext.createAudioOutput();
+    this.#outputNode.connect(audioContext.destination);
+    this.#outputNode.port.addEventListener("message", function (evt) {
+      that.dispatchEvent(evt.data);
     });
   }
   enqueue(args) {
-    const frameCount = this.#timeInterval * this.#ac.sampleRate;
-    const myAudioBuffer = this.#ac.createBuffer(2, frameCount, this.#ac.sampleRate);
-    const leftFloat32View = myAudioBuffer.getChannelData(0);
-    const rightFloat32View = myAudioBuffer.getChannelData(1);
-    this.#queue.enqueue(myAudioBuffer);
-    return {
-      leftChannel: leftFloat32View,
-      rightChannel: rightFloat32View,
-    };
+    this.#outputNode.port.postMessage(args.input, [ args.input.buffer ]);
   }
 };
 
@@ -90,23 +81,4 @@ export class LowPassWhiteNoise extends EventTarget {
   }
   new Event();
   this.dispatchEvent();
-};
-
-export class BufferQueue {
-  #getBufferFunction;
-  #thisBuffer;
-  #index;
-  constructor(args) {
-    this.#getBufferFunction = args.getBufferFunction;
-    this.#thisBuffer = this.#getBufferFunction();
-    this.#index = 0;
-  }
-  addElement(args) {
-    this.#thisBuffer[this.#index] = args;
-    ++this.#index;
-    if (this.#index === this.#thisBuffer.length) {
-      this.#thisBuffer = this.#getBufferFunction();
-      this.#index = 0;
-    }
-  }
 };
